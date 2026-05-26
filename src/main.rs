@@ -192,16 +192,10 @@ fn main() -> anyhow::Result<()> {
 
         for project_path in &processed_paths {
             match remove_not_built_with(project_path, &hashed_toolchains, dry_run) {
-                Ok(cleaned_amount) if dry_run => {
-                    info!(
-                        "Would clean: {} from {project_path:?}",
-                        format_bytes_or_nothing(cleaned_amount)
-                    );
-                    total_cleaned += cleaned_amount;
-                }
                 Ok(cleaned_amount) => {
+                    let action = if dry_run { "Would clean" } else { "Cleaned" };
                     info!(
-                        "Cleaned {} from {project_path:?}",
+                        "{action}: {} from {project_path:?}",
                         format_bytes_or_nothing(cleaned_amount)
                     );
                     total_cleaned += cleaned_amount;
@@ -215,16 +209,10 @@ fn main() -> anyhow::Result<()> {
     } else if let Criterion::MaxSize(size) = criterion {
         for project_path in &processed_paths {
             match remove_older_until_fits(project_path, size, dry_run) {
-                Ok(cleaned_amount) if dry_run => {
-                    info!(
-                        "Would clean: {} from {project_path:?}",
-                        format_bytes_or_nothing(cleaned_amount)
-                    );
-                    total_cleaned += cleaned_amount;
-                }
                 Ok(cleaned_amount) => {
+                    let action = if dry_run { "Would clean" } else { "Cleaned" };
                     info!(
-                        "Cleaned {} from {project_path:?}",
+                        "{action}: {} from {project_path:?}",
                         format_bytes_or_nothing(cleaned_amount)
                     );
                     total_cleaned += cleaned_amount;
@@ -244,16 +232,10 @@ fn main() -> anyhow::Result<()> {
 
         for project_path in &processed_paths {
             match remove_older_than(project_path, &keep_duration, dry_run) {
-                Ok(cleaned_amount) if dry_run => {
-                    info!(
-                        "Would clean: {} from {project_path:?}",
-                        format_bytes_or_nothing(cleaned_amount)
-                    );
-                    total_cleaned += cleaned_amount;
-                }
                 Ok(cleaned_amount) => {
+                    let action = if dry_run { "Would clean" } else { "Cleaned" };
                     info!(
-                        "Cleaned {} from {project_path:?}",
+                        "{action}: {} from {project_path:?}",
                         format_bytes_or_nothing(cleaned_amount)
                     );
                     total_cleaned += cleaned_amount;
@@ -261,10 +243,10 @@ fn main() -> anyhow::Result<()> {
                 Err(e) => error!("Failed to clean {:?}: {:?}", project_path, e),
             };
         }
+    }
 
-        if processed_paths.len() > 1 {
-            info!("Total amount: {}", format_bytes(total_cleaned));
-        }
+    if processed_paths.len() > 1 {
+        info!("Total amount: {}", format_bytes(total_cleaned));
     }
 
     Ok(())
