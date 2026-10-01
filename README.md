@@ -101,7 +101,21 @@ cargo sweep --stamp
 cargo sweep --file
 ```
 
-This writes a timestamp marker, then later removes artifacts older than that marker.
+This writes `sweep.timestamp` in the project directory. `--file` compares the
+marker with the access times of files in Cargo's fingerprint directories and
+removes matching artifact groups whose access times appear older. It consumes
+the marker during cleanup; use `--dry-run` to preview without consuming it.
+
+Access time is only a heuristic. A no-op Cargo build may leave these access
+times unchanged, so `--file` can remove artifacts needed by the next identical
+build. Filesystems may also disable or delay access-time updates. Check the
+dry-run output before cleanup, and expect a rebuild when using this workflow.
+`--time` and `--maxsize` use the same access-time signal. The current sweep
+inventory also leaves some data, including `incremental`, untouched.
+
+Cargo's experimental [`-Z mtime-on-use`](https://doc.rust-lang.org/cargo/reference/unstable.html#mtime-on-use)
+updates modification times on nightly Cargo. This version of `cargo-sweep`
+checks access times, so that Cargo option does not make `--file` exact.
 
 ## Toolchain behavior
 
