@@ -137,6 +137,10 @@ fn find_cargo_projects(root: &Path, include_hidden: bool) -> (Vec<PathBuf>, bool
     (target_paths.into_iter().collect(), discovery_failed)
 }
 
+fn target_key(path: &Path) -> PathBuf {
+    fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
+}
+
 fn metadata(path: &Path) -> Result<Metadata, Error> {
     let manifest_path = if path.file_name().and_then(OsStr::to_str) == Some("Cargo.toml") {
         path.to_owned()
@@ -203,15 +207,19 @@ fn main() -> anyhow::Result<()> {
         vec![target_dir.clone()]
     } else if args.recursive {
         info!("Searching recursively for Rust project folders");
-        let mut target_paths = std::collections::BTreeSet::new();
+        let mut target_paths = std::collections::BTreeMap::new();
         for path in &paths {
             let (found_paths, failed) = find_cargo_projects(path, args.hidden);
             discovery_failed |= failed;
-            target_paths.extend(found_paths);
+            for target_path in found_paths {
+                target_paths
+                    .entry(target_key(&target_path))
+                    .or_insert(target_path);
+            }
         }
-        target_paths.into_iter().collect::<Vec<_>>()
+        target_paths.into_values().collect::<Vec<_>>()
     } else {
-        let mut return_paths = std::collections::BTreeSet::new();
+        let mut return_paths = std::collections::BTreeMap::new();
         for path in &paths {
             let metadata = match metadata(path).context(format!(
                 "Failed to gather metadata for {:?}",
@@ -232,11 +240,20 @@ fn main() -> anyhow::Result<()> {
                 error!("Refusing to clean target directory outside project: {out:?}");
                 discovery_failed = true;
             } else {
-                return_paths.insert(out);
+                return_paths.entry(target_key(&out)).or_insert(out);
             };
         }
-        return_paths.into_iter().collect()
+        return_paths.into_values().collect()
     };
+
+    debug!(
+        "Selected {} target director{}",
+        processed_paths.len(),
+        if processed_paths.len() == 1 { "y" } else { "ies" }
+    );
+    for target in &processed_paths {
+        debug!("Selected target: {:?}", target);
+    }
 
     let mut total_cleaned = 0;
     let mut all_failed = discovery_failed;

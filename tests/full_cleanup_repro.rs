@@ -179,6 +179,27 @@ fn recursive_shared_target_preserves_unknown_paths() -> Result<()> {
 }
 
 #[test]
+fn duplicate_project_paths_select_target_once() -> Result<()> {
+    let temp = tempdir()?;
+    let project = temp.path().join("project");
+    fs::create_dir_all(project.join("src"))?;
+    fs::write(
+        project.join("Cargo.toml"),
+        "[package]\nname = \"duplicate-project\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+    )?;
+    fs::write(project.join("src/lib.rs"), "pub fn value() -> u8 { 42 }\n")?;
+    run(Command::new(env!("CARGO"))
+        .current_dir(&project)
+        .args(["build", "--offline"]))?;
+
+    let output = run(Command::new(env!("CARGO_BIN_EXE_cargo-sweep"))
+        .current_dir(&project)
+        .args(["sweep", "--all", "-v", ".", "./"]))?;
+    anyhow::ensure!(output.matches("Selected target:").count() == 1);
+    Ok(())
+}
+
+#[test]
 fn explicit_target_directory_works_without_manifest() -> Result<()> {
     let temp = tempdir()?;
     let target = temp.path().join("target");
