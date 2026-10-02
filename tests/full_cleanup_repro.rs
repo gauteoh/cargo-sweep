@@ -184,6 +184,7 @@ fn explicit_target_directory_works_without_manifest() -> Result<()> {
     let target = temp.path().join("target");
     let unknown = target.join("unrelated.txt");
     fs::create_dir_all(target.join("debug/deps"))?;
+    fs::write(target.join(".rustc_info.json"), "cargo target marker")?;
     fs::write(target.join("debug/deps/libowned.rlib"), "owned")?;
     fs::write(&unknown, "preserve")?;
 
@@ -212,6 +213,30 @@ fn explicit_target_directory_works_without_manifest() -> Result<()> {
     anyhow::ensure!(actual.contains("Successfully removed:"));
     anyhow::ensure!(unknown.exists());
     anyhow::ensure!(!target.join("debug/deps/libowned.rlib").exists());
+
+    let rejected = temp.path().join("rejected");
+    fs::create_dir_all(rejected.join("debug/deps"))?;
+    fs::write(rejected.join("debug/deps/fake.rlib"), "not Cargo-owned")?;
+    let output = Command::new(env!("CARGO_BIN_EXE_cargo-sweep"))
+        .current_dir(temp.path())
+        .args(["sweep", "--all", "--target-dir", rejected.to_str().unwrap()])
+        .output()?;
+    anyhow::ensure!(!output.status.success());
+    anyhow::ensure!(rejected.join("debug/deps/fake.rlib").exists());
+
+    let output = Command::new(env!("CARGO_BIN_EXE_cargo-sweep"))
+        .current_dir(temp.path())
+        .args([
+            "sweep",
+            "--all",
+            "--target-dir",
+            target.to_str().unwrap(),
+            "some-project",
+        ])
+        .output()?;
+    anyhow::ensure!(!output.status.success());
+    anyhow::ensure!(String::from_utf8_lossy(&output.stderr)
+        .contains("--target-dir cannot be combined with positional paths"));
     Ok(())
 }
 

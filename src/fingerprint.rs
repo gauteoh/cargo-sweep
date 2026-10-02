@@ -220,23 +220,24 @@ fn remove_not_matching_in_a_dir(
         if let Some(hash) = hash_from_path_name(&name) {
             if !keep.contains(hash) {
                 if path.is_file() {
-                    total_disk_space += metadata.len();
                     if !dry_run {
-                        match remove_file(&path) {
-                            Ok(_) => debug!("Successfully removed: {:?}", &path),
-                            Err(e) => warn!("Failed to remove: {:?} {}", &path, e),
-                        };
-                    } else {
+                        remove_file(&path)
+                            .with_context(|| format!("Failed to remove {}", path.display()))?;
+                        debug!("Successfully removed: {:?}", &path);
+                    }
+                    total_disk_space += metadata.len();
+                    if dry_run {
                         debug!("Would remove: {:?}", &path);
                     }
                 } else if path.is_dir() {
-                    total_disk_space += total_disk_space_dir(&path);
+                    let bytes = total_disk_space_dir(&path);
                     if !dry_run {
-                        match remove_dir_all(&path) {
-                            Ok(_) => debug!("Successfully removed: {:?}", &path),
-                            Err(e) => warn!("Failed to remove: {:?} {}", &path, e),
-                        };
-                    } else {
+                        remove_dir_all(&path)
+                            .with_context(|| format!("Failed to remove {}", path.display()))?;
+                        debug!("Successfully removed: {:?}", &path);
+                    }
+                    total_disk_space += bytes;
+                    if dry_run {
                         debug!("Would remove: {:?}", &path);
                     }
                 }

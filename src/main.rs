@@ -60,6 +60,10 @@ fn setup_logging(verbosity_level: u8) {
         .unwrap();
 }
 
+fn target_directory_is_owned(target_directory: &Path) -> bool {
+    target_directory.join(".rustc_info.json").is_file()
+}
+
 fn target_directory_is_safe(project_path: &Path, target_directory: &Path) -> bool {
     if env::var_os("CARGO_TARGET_DIR").is_some() {
         return true;
@@ -154,6 +158,7 @@ fn main() -> anyhow::Result<()> {
     setup_logging(args.verbose);
 
     // Default to current invocation path.
+    let has_positional_paths = !args.path.is_empty();
     let paths = match args.path.len() {
         0 => vec![env::current_dir().expect("Failed to get current directory")],
         _ => args.path,
@@ -183,8 +188,17 @@ fn main() -> anyhow::Result<()> {
 
     let mut discovery_failed = false;
     let processed_paths = if let Some(target_dir) = &args.target_dir {
+        if has_positional_paths {
+            anyhow::bail!("--target-dir cannot be combined with positional paths");
+        }
         if !target_dir.exists() {
             anyhow::bail!("Target directory does not exist: {}", target_dir.display());
+        }
+        if !target_directory_is_owned(target_dir) {
+            anyhow::bail!(
+                "Refusing target directory without Cargo ownership markers: {}",
+                target_dir.display()
+            );
         }
         vec![target_dir.clone()]
     } else if args.recursive {

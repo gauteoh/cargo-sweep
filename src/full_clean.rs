@@ -6,14 +6,7 @@ use std::{
 };
 use walkdir::WalkDir;
 
-const CACHE_DIRS: [&str; 6] = [
-    ".fingerprint",
-    "build",
-    "deps",
-    "incremental",
-    "examples",
-    "native",
-];
+const CACHE_DIRS: [&str; 5] = [".fingerprint", "build", "deps", "incremental", "native"];
 
 struct Candidate {
     path: PathBuf,
