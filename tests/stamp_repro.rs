@@ -1,8 +1,9 @@
 use std::{
     collections::BTreeSet,
-    fs,
+    fs::{self, File, FileTimes},
     path::{Path, PathBuf},
     process::{Command, Output},
+    time::{Duration, SystemTime},
 };
 
 use anyhow::{Context, Result};
@@ -34,6 +35,25 @@ fn selected_paths(output: &Output, prefix: &str) -> BTreeSet<String> {
         .lines()
         .filter_map(|line| line.split_once(prefix).map(|(_, path)| path.to_owned()))
         .collect()
+}
+
+fn set_old_fingerprint_access_times(target: &Path) -> Result<()> {
+    let old = SystemTime::now() - Duration::from_secs(24 * 60 * 60);
+    for entry in WalkDir::new(target) {
+        let entry = entry?;
+        if entry.file_type().is_file()
+            && entry
+                .path()
+                .components()
+                .any(|part| part.as_os_str() == ".fingerprint")
+        {
+            File::options()
+                .write(true)
+                .open(entry.path())?
+                .set_times(FileTimes::new().set_accessed(old))?;
+        }
+    }
+    Ok(())
 }
 
 fn build(workspace: &Path, target: &Path, release: bool) -> Result<(usize, usize)> {
@@ -124,6 +144,10 @@ fn stamp_noop_build_cleanup_rebuild_matrix() -> Result<()> {
             .current_dir(&workspace)
             .env("CARGO_TARGET_DIR", &target);
         let preview = run(&mut dry_run)?;
+        anyhow::ensure!(
+            String::from_utf8_lossy(&preview.stdout).contains("[WARN] --file uses access times"),
+            "dry run did not warn about access times"
+        );
         anyhow::ensure!(files(&target) == before, "dry run changed {profile} target");
 
         let mut sweep = Command::new(env!("CARGO_BIN_EXE_cargo-sweep"));
@@ -155,6 +179,37 @@ fn stamp_noop_build_cleanup_rebuild_matrix() -> Result<()> {
             selected.len()
         );
         eprintln!("{profile} selected paths: {selected:#?}");
+
+        let mut stamp = Command::new(env!("CARGO_BIN_EXE_cargo-sweep"));
+        stamp
+            .args(["sweep", "--stamp"])
+            .current_dir(&workspace)
+            .env("CARGO_TARGET_DIR", &target);
+        run(&mut stamp)?;
+        let (static_fresh, static_rebuilt) = build(&workspace, &target, release)?;
+        anyhow::ensure!(static_fresh >= 3 && static_rebuilt == 0);
+        set_old_fingerprint_access_times(&target)?;
+
+        let mut sweep = Command::new(env!("CARGO_BIN_EXE_cargo-sweep"));
+        sweep
+            .args(["sweep", "--file", "--verbose"])
+            .current_dir(&workspace)
+            .env("CARGO_TARGET_DIR", &target);
+        let static_cleanup = run(&mut sweep)?;
+        let static_selected = selected_paths(&static_cleanup, "Successfully removed: ");
+        anyhow::ensure!(
+            !static_selected.is_empty(),
+            "static access times selected nothing in {profile}"
+        );
+        let (_, static_rebuilt_after) = build(&workspace, &target, release)?;
+        anyhow::ensure!(
+            static_rebuilt_after >= 3,
+            "static access times did not reproduce rebuild in {profile}"
+        );
+        eprintln!(
+            "{profile} with static access times: selected={} rebuilt_after={static_rebuilt_after}",
+            static_selected.len()
+        );
     }
     Ok(())
 }

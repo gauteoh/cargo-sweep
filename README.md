@@ -77,11 +77,18 @@ Shrink `target/` until it is below 10 GiB:
 cargo sweep --maxsize 10GiB
 ```
 
-Clean everything in a specific project:
+Remove recognized Cargo cache directories in a specific project:
 
 ```bash
 cargo sweep --all path/to/project
 ```
+
+`--all` removes `.fingerprint`, `build`, `deps`, `incremental`, `examples`,
+and legacy `native` directories inside discovered Cargo build profiles. It
+reports paths it cannot classify in verbose output and leaves final outputs
+and unrelated files alone. `--time 0` continues to select only artifacts
+matched through fingerprints. For complete target-directory removal, use
+`cargo clean`.
 
 Recursively sweep all Cargo projects under a directory:
 

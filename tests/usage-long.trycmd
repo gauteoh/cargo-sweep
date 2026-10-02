@@ -33,10 +33,13 @@ Options:
           Store timestamp file at the given path, is used by file option
 
   -t, --time <DAYS>
-          Delete only artifacts older than ... days
+          Delete fingerprint-matched artifacts older than DAYS (0 still skips incremental)
 
   -a, --all
-          Apply on all provided projects
+          Remove recognized Cargo cache directories; keep unknown paths and final outputs
+
+      --target-dir <DIR>
+          Explicit Cargo target directory; may be used without a Cargo manifest
 
       --toolchains <TOOLCHAINS>
           Toolchains currently installed by rustup that should have their artifacts kept

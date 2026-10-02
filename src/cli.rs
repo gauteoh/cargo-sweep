@@ -76,13 +76,17 @@ pub struct Args {
     #[arg(short, long)]
     stamp: bool,
 
-    /// Delete only artifacts older than ... days
+    /// Delete fingerprint-matched artifacts older than DAYS (0 still skips incremental)
     #[arg(short, long, value_name = "DAYS")]
     time: Option<u64>,
 
-    /// Apply on all provided projects
+    /// Remove recognized Cargo cache directories; keep unknown paths and final outputs
     #[arg(short, long)]
     all: bool,
+
+    /// Explicit Cargo target directory; may be used without a Cargo manifest
+    #[arg(long, value_name = "DIR", conflicts_with = "recursive")]
+    pub target_dir: Option<PathBuf>,
 
     /// Toolchains currently installed by rustup that should have their artifacts kept
     #[arg(long, value_delimiter = ',')]
@@ -101,7 +105,7 @@ impl Args {
             _ if self.file => Criterion::File,
             _ if self.installed => Criterion::Installed,
             _ if !self.toolchains.is_empty() => Criterion::Toolchains(self.toolchains.clone()),
-            _ if self.all => Criterion::Time(0),
+            _ if self.all => Criterion::All,
             Self {
                 time: Some(time), ..
             } => Criterion::Time(*time),
@@ -129,6 +133,7 @@ impl Args {
 pub enum Criterion {
     Stamp,
     File,
+    All,
     Time(u64),
     Installed,
     Toolchains(Vec<String>),

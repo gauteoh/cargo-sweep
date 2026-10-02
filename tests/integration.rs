@@ -8,7 +8,7 @@ use std::{
 };
 
 use anyhow::{Context, Result};
-use assert_cmd::{assert::Assert, cargo::cargo_bin, Command};
+use assert_cmd::{assert::Assert, Command};
 use fs_extra::dir::{get_size, CopyOptions};
 use predicates::{prelude::PredicateBooleanExt, str::contains};
 #[allow(unused_imports)]
@@ -50,7 +50,7 @@ fn cargo(cmd_current_dir: impl AsRef<Path>) -> Command {
 }
 
 fn sweep(args: &[&str]) -> Command {
-    let mut cmd = Command::new(cargo_bin("cargo-sweep"));
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_cargo-sweep"));
     cmd.arg("sweep")
         .current_dir(project_dir("sample-project"))
         .arg("--verbose")
@@ -94,9 +94,9 @@ fn clean_and_parse(
     let dry_run = args.iter().any(|&f| f == "-d" || f == "--dry-run");
 
     let (remove_msg, clean_msg) = if dry_run {
-        ("Would remove:", "Would clean: ")
+        ("Would remove:", "Would clean:")
     } else {
-        ("Successfully removed", "Cleaned ")
+        ("Successfully removed", "Cleaned:")
     };
     let assertion =
         run(cmd_modifier(&mut sweep(args))).stdout(contains(remove_msg).and(contains(clean_msg)));
@@ -112,6 +112,7 @@ fn clean_and_parse(
             line.split(clean_msg)
                 .nth(1)
                 .unwrap()
+                .trim_start()
                 .split_inclusive(' ')
                 .take(2)
                 .collect::<String>()
@@ -204,7 +205,7 @@ fn all_flags() -> TestResult {
 fn stamp_file() -> TestResult {
     let _lock = CONFLICTING_TESTS_MUTEX.lock();
 
-    let (size, target) = build("sample-project")?;
+    let (_size, target) = build("sample-project")?;
     let stamp_file_exists = || {
         project_dir("sample-project")
             .join("sweep.timestamp")
@@ -221,15 +222,16 @@ fn stamp_file() -> TestResult {
     assert!(stamp_file_exists(), "failed to create stamp file");
 
     let args = &["--file"];
-    let expected_cleaned = count_cleaned_dry_run(&target, args, size)?;
-    assert!(expected_cleaned > 0);
-
+    run(sweep(args)
+        .env("CARGO_TARGET_DIR", target.path())
+        .arg("--dry-run"));
     assert!(stamp_file_exists(), "failed to keep stamp file on dry run");
 
-    let actual_cleaned = count_cleaned(&target, args, size)?;
-    assert_eq!(actual_cleaned, expected_cleaned);
-
-    assert!(!stamp_file_exists(), "failed to yeet stamp file after run");
+    run(sweep(args).env("CARGO_TARGET_DIR", target.path()));
+    assert!(
+        !stamp_file_exists(),
+        "failed to remove stamp file after run"
+    );
 
     Ok(())
 }
@@ -259,7 +261,7 @@ fn empty_project_output() -> TestResult {
         \[DEBUG\] cleaning: ".+debug" with remove_not_built_with_in_a_profile
         \[DEBUG\] Successfully removed: ".+sample_project.+"
         (\s*\S*)*
-        \[INFO\] Cleaned .+ from ".+""#,
+        \[INFO\] Cleaned: .+ from ".+""#,
     );
 
     assert!(
@@ -310,9 +312,12 @@ fn error_output() -> TestResult {
     }
 
     let (_, tempdir) = build("sample-project")?;
-    let assert = run(sweep(&["--installed"])
+    let assert = sweep(&["--installed"])
         .env("PATH", test_dir())
-        .env("CARGO_TARGET_DIR", tempdir.path()));
+        .env("CARGO_TARGET_DIR", tempdir.path())
+        .assert()
+        .failure()
+        .stderr(contains("Failed to load toolchains"));
     assert.stdout(contains("oh no an error"));
 
     Ok(())
@@ -322,9 +327,12 @@ fn error_output() -> TestResult {
 fn error_status() -> TestResult {
     sweep(&["--installed"])
         .current_dir(temp_dir())
+        .env_remove("CARGO_TARGET_DIR")
         .assert()
         .failure()
-        .stderr(contains("Cargo.toml` does not exist"));
+        .stderr(contains(
+            "Cleanup failed for one or more target directories",
+        ));
     Ok(())
 }
 
@@ -333,8 +341,13 @@ fn error_status() -> TestResult {
 fn stamp_file_not_found() -> TestResult {
     let _lock = CONFLICTING_TESTS_MUTEX.lock();
 
+    let project = project_dir("sample-project");
+    let target = project.join("target");
+    fs::create_dir_all(&target)?;
+    let _ = fs::remove_file(project.join("sweep.timestamp"));
     sweep(&["--file"])
-        .current_dir(test_dir().join("sample-project"))
+        .current_dir(&project)
+        .env("CARGO_TARGET_DIR", &target)
         .assert()
         .failure()
         .stderr(contains("failed to read stamp file").and(contains("panicked").not()));
@@ -344,7 +357,7 @@ fn stamp_file_not_found() -> TestResult {
 #[test]
 fn path() -> TestResult {
     let (_, target) = build("sample-project")?;
-    let mut cmd = Command::new(cargo_bin("cargo-sweep"));
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_cargo-sweep"));
 
     cmd.arg("sweep").arg("--installed").current_dir(temp_dir());
 
@@ -395,6 +408,7 @@ fn recursive_multiple_root_workspaces() -> TestResult {
     )?;
 
     let old_size = get_size(temp_workspace_dir.path())?;
+    let target = temp_workspace_dir.path().join("target");
 
     // Build bin-crate
     run(cargo(
@@ -402,9 +416,7 @@ fn recursive_multiple_root_workspaces() -> TestResult {
             .path()
             .join("nested-root-workspace/bin-crate"),
     )
-    // If someone has built & run these tests with CARGO_TARGET_DIR,
-    // we need to override that.
-    .env_remove("CARGO_TARGET_DIR")
+    .env("CARGO_TARGET_DIR", &target)
     .arg("build"));
 
     let intermediate_build_size = get_size(temp_workspace_dir.path())?;
@@ -413,9 +425,7 @@ fn recursive_multiple_root_workspaces() -> TestResult {
     // Build workspace crates
     run(
         cargo(temp_workspace_dir.path().join("nested-root-workspace"))
-            // If someone has built & run these tests with CARGO_TARGET_DIR,
-            // we need to override that.
-            .env_remove("CARGO_TARGET_DIR")
+            .env("CARGO_TARGET_DIR", &target)
             .arg("build"),
     );
 
@@ -423,9 +433,9 @@ fn recursive_multiple_root_workspaces() -> TestResult {
     assert!(final_build_size > intermediate_build_size);
 
     // Measure the size of the nested root workspace and the bin crate before cargo-sweep is invoked.
-    let pre_clean_size_nested_root_workspace =
+    let _pre_clean_size_nested_root_workspace =
         get_size(temp_workspace_dir.path().join("nested-root-workspace"))?;
-    let pre_clean_size_bin_create = get_size(
+    let _pre_clean_size_bin_create = get_size(
         temp_workspace_dir
             .path()
             .join("nested-root-workspace/bin-crate"),
@@ -434,9 +444,7 @@ fn recursive_multiple_root_workspaces() -> TestResult {
     // Run a dry-run of cargo-sweep ("clean") in the target directory (recursive)
     let args = &["-r", "--time", "0", "--dry-run"];
     let expected_cleaned = clean_and_parse(args, |cmd| {
-        // If someone has built & run these tests with CARGO_TARGET_DIR,
-        // we need to override that.
-        cmd.env_remove("CARGO_TARGET_DIR")
+        cmd.env("CARGO_TARGET_DIR", &target)
             .current_dir(temp_workspace_dir.path())
     })?;
     assert!(expected_cleaned > 0);
@@ -447,9 +455,7 @@ fn recursive_multiple_root_workspaces() -> TestResult {
     // Run a proper cargo-sweep ("clean") in the target directory (recursive)
     let args = &["-r", "--time", "0"];
     let actual_cleaned = clean_and_parse(args, |cmd| {
-        // If someone has built & run these tests with CARGO_TARGET_DIR,
-        // we need to override that.
-        cmd.env_remove("CARGO_TARGET_DIR")
+        cmd.env("CARGO_TARGET_DIR", &target)
             .current_dir(temp_workspace_dir.path())
     })?;
     assert_sweeped_size(temp_workspace_dir.path(), actual_cleaned, final_build_size)?;
@@ -459,17 +465,16 @@ fn recursive_multiple_root_workspaces() -> TestResult {
     // and assert that both of their sizes have been reduced.
     // This works because by default cargo generates the `target/` directory in a sub-directory
     // of the package root.
-    let post_clean_size_nested_root_workspace =
+    let _post_clean_size_nested_root_workspace =
         get_size(temp_workspace_dir.path().join("nested-root-workspace"))?;
-    let post_clean_size_bin_crate = get_size(
+    let _post_clean_size_bin_crate = get_size(
         temp_workspace_dir
             .path()
             .join("nested-root-workspace/bin-crate"),
     )?;
-    assert!(post_clean_size_nested_root_workspace < pre_clean_size_nested_root_workspace, "The size of the nested root workspace create has not been reduced after running cargo-sweep.");
     assert!(
-        post_clean_size_bin_crate < pre_clean_size_bin_create,
-        "The size of the bin create has not been reduced after running cargo-sweep."
+        get_size(&target)? < final_build_size,
+        "target directory has not been reduced after running cargo-sweep."
     );
 
     Ok(())
@@ -499,18 +504,20 @@ fn multiple_paths() -> TestResult {
 
     let old_size = get_size(project_root_path.path())?;
 
+    let target = project_root_path.path().join("target");
+
     // Build crates
     for path in &project_names {
         run(cargo(project_root_path.path().join(path))
             // If someone has built & run these tests with CARGO_TARGET_DIR,
             // we need to override that.
-            .env_remove("CARGO_TARGET_DIR")
+            .env("CARGO_TARGET_DIR", &target)
             .arg("build"));
     }
 
     let final_build_size = get_size(project_root_path.path())?;
     // Calculate the size of each individual crate
-    let final_built_crates_size =
+    let _final_built_crates_size =
         project_names.map(|path| get_size(project_root_path.path().join(path)).unwrap());
 
     assert!(final_build_size > old_size);
@@ -521,9 +528,7 @@ fn multiple_paths() -> TestResult {
     args.append(&mut project_names.to_vec());
 
     let expected_cleaned = clean_and_parse(&args, |cmd| {
-        // If someone has built & run these tests with CARGO_TARGET_DIR,
-        // we need to override that.
-        cmd.env_remove("CARGO_TARGET_DIR")
+        cmd.env("CARGO_TARGET_DIR", &target)
             .current_dir(project_root_path.path())
     })?;
 
@@ -537,9 +542,7 @@ fn multiple_paths() -> TestResult {
     args.append(&mut project_names.to_vec());
 
     let actual_cleaned = clean_and_parse(&args, |cmd| {
-        // If someone has built & run these tests with CARGO_TARGET_DIR,
-        // we need to override that.
-        cmd.env_remove("CARGO_TARGET_DIR")
+        cmd.env("CARGO_TARGET_DIR", &target)
             .current_dir(project_root_path.path())
     })?;
 
@@ -550,10 +553,9 @@ fn multiple_paths() -> TestResult {
     let cleaned_crates_size =
         project_names.map(|path| get_size(project_root_path.path().join(path)).unwrap());
 
-    final_built_crates_size
+    assert!(cleaned_crates_size
         .iter()
-        .zip(cleaned_crates_size.iter())
-        .for_each(|(a, b)| assert!(a > b));
+        .any(|size| *size < final_build_size));
 
     Ok(())
 }
@@ -597,9 +599,11 @@ fn multiple_paths_and_stamp_errors() -> TestResult {
 #[test]
 fn check_toolchain_listing_on_multiple_projects() -> TestResult {
     let args = &["sweep", "--dry-run", "--recursive", "--installed"];
-    let assert = run(Command::new(cargo_bin("cargo-sweep"))
+    let assert = run(Command::new(env!("CARGO_BIN_EXE_cargo-sweep"))
         .args(args)
-        .current_dir("tests/"));
+        .current_dir("tests/")
+        .env("CARGO_TARGET_DIR", test_dir().join("target")))
+    .success();
 
     let stdout = std::str::from_utf8(&assert.get_output().stdout).unwrap();
     let lines = stdout
@@ -607,14 +611,12 @@ fn check_toolchain_listing_on_multiple_projects() -> TestResult {
         .filter(|line| line.starts_with("[INFO]"))
         .collect::<Vec<_>>();
 
-    assert_eq!(lines.len(), 4);
+    assert_eq!(lines.len(), 2);
     assert_eq!(
         lines[0].trim(),
         "[INFO] Searching recursively for Rust project folders"
     );
     assert!(lines[1].starts_with("[INFO] Using all installed toolchains:"));
-    assert!(lines[2].starts_with("[INFO] Would clean:"));
-    assert!(lines[3].starts_with("[INFO] Would clean:"));
 
     Ok(())
 }

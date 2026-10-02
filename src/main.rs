@@ -7,6 +7,7 @@ use log::{debug, error, info, warn};
 use std::{
     env,
     ffi::OsStr,
+    fs,
     path::{Path, PathBuf},
     time::Duration,
 };
@@ -14,6 +15,7 @@ use walkdir::WalkDir;
 
 mod cli;
 mod fingerprint;
+mod full_clean;
 mod stamp;
 mod util;
 
@@ -21,6 +23,7 @@ use self::cli::Criterion;
 use self::fingerprint::{
     hash_toolchains, remove_not_built_with, remove_older_than, remove_older_until_fits,
 };
+use self::full_clean::remove_recognized_cargo_cache;
 use self::stamp::Timestamp;
 use self::util::{format_bytes, format_bytes_or_nothing};
 
@@ -57,15 +60,32 @@ fn setup_logging(verbosity_level: u8) {
         .unwrap();
 }
 
+fn target_directory_is_safe(project_path: &Path, target_directory: &Path) -> bool {
+    if env::var_os("CARGO_TARGET_DIR").is_some() {
+        return true;
+    }
+
+    let project_path =
+        fs::canonicalize(project_path).unwrap_or_else(|_| project_path.to_path_buf());
+    let target_directory =
+        fs::canonicalize(target_directory).unwrap_or_else(|_| target_directory.to_path_buf());
+    target_directory.starts_with(project_path)
+}
+
 /// Returns whether the given path to a Cargo.toml points to a real target directory.
-fn is_cargo_root(path: &Path) -> Option<PathBuf> {
+fn is_cargo_root(path: &Path) -> (Option<PathBuf>, bool) {
     if let Ok(metadata) = metadata(path) {
         let out = Path::new(&metadata.target_directory).to_path_buf();
+        let project_path = path.parent().unwrap_or(path);
+        if out.exists() && target_directory_is_safe(project_path, &out) {
+            return (Some(out), false);
+        }
         if out.exists() {
-            return Some(out);
+            error!("Skipping target directory outside project: {out:?}");
+            return (None, true);
         }
     }
-    None
+    (None, false)
 }
 
 /// is a `DirEntry` a unix stile hidden file, ie starts with `.`
@@ -77,8 +97,9 @@ fn is_hidden(entry: &walkdir::DirEntry) -> bool {
 }
 
 /// Find all cargo project under the given root path.
-fn find_cargo_projects(root: &Path, include_hidden: bool) -> Vec<PathBuf> {
+fn find_cargo_projects(root: &Path, include_hidden: bool) -> (Vec<PathBuf>, bool) {
     let mut target_paths = std::collections::BTreeSet::new();
+    let mut discovery_failed = false;
 
     let mut iter = WalkDir::new(root).min_depth(1).into_iter();
 
@@ -100,14 +121,16 @@ fn find_cargo_projects(root: &Path, include_hidden: bool) -> Vec<PathBuf> {
             if entry.file_name() != "Cargo.toml" {
                 continue;
             }
-            if let Some(target_directory) = is_cargo_root(entry.path()) {
+            let (target_directory, failed) = is_cargo_root(entry.path());
+            discovery_failed |= failed;
+            if let Some(target_directory) = target_directory {
                 target_paths.insert(target_directory);
                 // Previously cargo-sweep skipped subdirectories here, but it is valid for
                 // subdirectories to contain cargo roots.
             }
         }
     }
-    target_paths.into_iter().collect()
+    (target_paths.into_iter().collect(), discovery_failed)
 }
 
 fn metadata(path: &Path) -> Result<Metadata, Error> {
@@ -148,30 +171,61 @@ fn main() -> anyhow::Result<()> {
             .context("Failed to write timestamp file");
     };
 
-    let processed_paths = if args.recursive {
-        info!("Searching recursively for Rust project folders");
-        paths
-            .iter()
-            .flat_map(|path| find_cargo_projects(path, args.hidden))
-            .collect::<Vec<_>>()
+    let file_duration = if matches!(criterion, Criterion::File) {
+        warn!("--file uses access times, which may be static or unavailable; artifacts needed by the next build can be removed");
+        Some(Duration::from(Timestamp::load(
+            paths[0].as_path(),
+            dry_run,
+        )?))
     } else {
-        let mut return_paths = Vec::with_capacity(paths.len());
+        None
+    };
+
+    let mut discovery_failed = false;
+    let processed_paths = if let Some(target_dir) = &args.target_dir {
+        if !target_dir.exists() {
+            anyhow::bail!("Target directory does not exist: {}", target_dir.display());
+        }
+        vec![target_dir.clone()]
+    } else if args.recursive {
+        info!("Searching recursively for Rust project folders");
+        let mut target_paths = std::collections::BTreeSet::new();
         for path in &paths {
-            let metadata = metadata(path).context(format!(
+            let (found_paths, failed) = find_cargo_projects(path, args.hidden);
+            discovery_failed |= failed;
+            target_paths.extend(found_paths);
+        }
+        target_paths.into_iter().collect::<Vec<_>>()
+    } else {
+        let mut return_paths = std::collections::BTreeSet::new();
+        for path in &paths {
+            let metadata = match metadata(path).context(format!(
                 "Failed to gather metadata for {:?}",
                 path.display()
-            ))?;
+            )) {
+                Ok(metadata) => metadata,
+                Err(error) => {
+                    error!("{error:#}");
+                    discovery_failed = true;
+                    continue;
+                }
+            };
             let out = Path::new(&metadata.target_directory).to_path_buf();
-            if out.exists() {
-                return_paths.push(out);
+            if !out.exists() {
+                error!("Failed to clean {:?} as it does not exist.", out);
+                discovery_failed = true;
+            } else if !target_directory_is_safe(path, &out) {
+                error!("Refusing to clean target directory outside project: {out:?}");
+                discovery_failed = true;
             } else {
-                warn!("Failed to clean {:?} as it does not exist.", out)
+                return_paths.insert(out);
             };
         }
-        return_paths
+        return_paths.into_iter().collect()
     };
 
     let mut total_cleaned = 0;
+    let mut all_failed = discovery_failed;
 
     // `None`: do not remove based on toolchain version
     // `Some(None)`: remove all installed toolchains
@@ -186,7 +240,7 @@ fn main() -> anyhow::Result<()> {
             Ok(toolchains) => toolchains,
             Err(err) => {
                 error!("{:?}", err.context("Failed to load toolchains."));
-                return Ok(());
+                anyhow::bail!("Failed to load toolchains");
             }
         };
 
@@ -200,11 +254,35 @@ fn main() -> anyhow::Result<()> {
                     );
                     total_cleaned += cleaned_amount;
                 }
-                Err(e) => error!(
-                    "{:?}",
-                    e.context(format!("Failed to clean {project_path:?}"))
-                ),
+                Err(e) => {
+                    all_failed = true;
+                    error!(
+                        "{:?}",
+                        e.context(format!("Failed to clean {project_path:?}"))
+                    );
+                }
             };
+        }
+    } else if let Criterion::All = criterion {
+        for project_path in &processed_paths {
+            match remove_recognized_cargo_cache(project_path, dry_run) {
+                Ok(report) => {
+                    let action = if dry_run { "Would clean" } else { "Cleaned" };
+                    info!(
+                        "{action}: {} from {project_path:?}",
+                        format_bytes_or_nothing(report.removed_bytes)
+                    );
+                    total_cleaned += report.removed_bytes;
+                    for error in report.errors {
+                        all_failed = true;
+                        error!("{error:#}");
+                    }
+                }
+                Err(e) => {
+                    all_failed = true;
+                    error!("Failed to clean {:?}: {:?}", project_path, e);
+                }
+            }
         }
     } else if let Criterion::MaxSize(size) = criterion {
         for project_path in &processed_paths {
@@ -217,13 +295,15 @@ fn main() -> anyhow::Result<()> {
                     );
                     total_cleaned += cleaned_amount;
                 }
-                Err(e) => error!("Failed to clean {:?}: {:?}", project_path, e),
+                Err(e) => {
+                    all_failed = true;
+                    error!("Failed to clean {:?}: {:?}", project_path, e);
+                }
             };
         }
     } else {
-        let keep_duration = if let Criterion::File = criterion {
-            let ts = Timestamp::load(paths[0].as_path(), dry_run)?;
-            Duration::from(ts)
+        let keep_duration = if let Some(duration) = file_duration {
+            duration
         } else if let Criterion::Time(days_to_keep) = criterion {
             Duration::from_secs(days_to_keep * 24 * 3600)
         } else {
@@ -240,13 +320,24 @@ fn main() -> anyhow::Result<()> {
                     );
                     total_cleaned += cleaned_amount;
                 }
-                Err(e) => error!("Failed to clean {:?}: {:?}", project_path, e),
+                Err(e) => {
+                    all_failed = true;
+                    error!("Failed to clean {:?}: {:?}", project_path, e);
+                }
             };
         }
     }
 
     if processed_paths.len() > 1 {
         info!("Total amount: {}", format_bytes(total_cleaned));
+    }
+
+    if all_failed {
+        anyhow::bail!("Cleanup failed for one or more target directories");
+    }
+
+    if matches!(criterion, Criterion::File) && !dry_run {
+        Timestamp::remove(paths[0].as_path()).context("Failed to remove timestamp file")?;
     }
 
     Ok(())

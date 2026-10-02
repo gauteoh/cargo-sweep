@@ -29,19 +29,22 @@ impl Timestamp {
 
     /// Attempts to load the the timestamp file in the given directory.
     ///
-    /// On dry run, keep the timestamp file. Otherwise it is deleted.
-    pub fn load(target_dir: &Path, dry_run: bool) -> Result<Timestamp, Error> {
+    /// Load timestamp without changing it. Cleanup consumes it only after success.
+    pub fn load(target_dir: &Path, _dry_run: bool) -> Result<Timestamp, Error> {
         let mut path = target_dir.to_path_buf();
         path.push("sweep.timestamp");
         let mut file =
             File::open(&path).context(format!("failed to read stamp file {}", path.display()))?;
         let mut contents = String::new();
         file.read_to_string(&mut contents)?;
-        if !dry_run {
-            remove_file(&path)?;
-        }
         let timestamp: Timestamp = from_str(&contents)?;
         Ok(timestamp)
+    }
+
+    /// Consume stored timestamp after successful cleanup.
+    pub fn remove(target_dir: &Path) -> Result<(), Error> {
+        let path = target_dir.join("sweep.timestamp");
+        remove_file(&path).context(format!("failed to remove stamp file {}", path.display()))
     }
 }
 
